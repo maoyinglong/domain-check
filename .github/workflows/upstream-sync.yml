@@ -2,10 +2,12 @@ name: 自动同步上游仓库
 
 permissions:
   contents: write
+  actions: write
 
 on:
   schedule:
-    - cron: "0 0 * * *" # every day
+    # 每月 1 日与 20 日 03:00 UTC（北京时间 11:00）运行一次，告别每日空转
+    - cron: "0 3 1,20 * *"
   workflow_dispatch:
 
 jobs:
@@ -17,6 +19,8 @@ jobs:
     steps:
       - name: 检出本仓库
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: 同步上游仓库
         id: sync
@@ -25,8 +29,35 @@ jobs:
           upstream_sync_repo: yutian81/domain-check
           upstream_sync_branch: main
           target_sync_branch: main
-          target_repo_token: ${{ secrets.GITHUB_TOKEN }} # 无需设置
+          target_repo_token: ${{ secrets.GITHUB_TOKEN }}
+          shallow_since: 3 months ago
           test_mode: false
+
+      - name: 快到期且无更新时自动续签保活
+        if: success() && steps.sync.outputs.has_new_commits == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          LAST_COMMIT_EPOCH=$(git log -1 --format=%ct)
+          NOW_EPOCH=$(date +%s)
+          DAYS_ELAPSED=$(( (NOW_EPOCH - LAST_COMMIT_EPOCH) / 86400 ))
+          echo "距离上一次代码提交已有 $DAYS_ELAPSED 天。"
+
+          # 调用 API 刷新 workflow 活跃状态
+          gh api -X PUT "repos/${{ github.repository }}/actions/workflows/upstream-sync.yml/enable" || true
+
+          # GitHub Actions 针对 public 仓库超过 60 天无提交活动会自动停用定时工作流
+          # 当距上次提交超过 40 天且上游无新更新时，自动提交空提交续签保活
+          if [ "$DAYS_ELAPSED" -ge 40 ]; then
+            echo "距离 60 天停用期已满 40 天，执行自动续签保活..."
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git commit --allow-empty -m "chore(keepalive): 自动续签 GitHub Actions 定时任务 [skip ci]"
+            git push origin main
+            echo "✅ 已成功提交空提交续签，60 天倒计时已重置。"
+          else
+            echo "距 60 天上限仍有充足安全缓冲（< 40 天），无需生成多余提交。"
+          fi
 
       - name: 检查同步状态
         if: failure()
